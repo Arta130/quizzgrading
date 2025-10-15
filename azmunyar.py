@@ -1,15 +1,3 @@
-
-# Place Key Sheet in the cyan box.
-
-# Press 'K' to capture the key.
-
-# (Optional, but recommended) Press 'C' to define the ROI (bubble area) once.
-
-# Press 'P' to switch to Grading Ready mode.
-
-# Place Student Sheet in the cyan box.
-
-# Press 'R' to see the final grade.
 import cv2
 import numpy as np
 import json
@@ -314,7 +302,9 @@ def process_key_with_roi(full_warped_key):
 
     key_img = cropped_key # Set the global key_img to the cropped/final version
     key_positions = new_key_positions
-    print(f"✅ Key processed with {len(key_positions)} filled bubbles.")
+    # Use safe check for printing key_positions length
+    ans_count = len(key_positions) if key_positions is not None else 0
+    print(f"✅ Key processed with {ans_count} filled bubbles.")
     return key_preview
 
 
@@ -385,7 +375,9 @@ def run_grader():
             key_img = cv2.imread(KEY_CROPPED_PATH)
             with open(KEY_POS_PATH, "r") as f:
                 key_positions = json.load(f)
-            print(f"💾 Loaded existing key with {len(key_positions)} answers.")
+            # Use safe check for print output
+            ans_count = len(key_positions) if key_positions is not None else 0
+            print(f"💾 Loaded existing key with {ans_count} answers.")
         except Exception as e:
             print(f"Error loading cropped key files: {e}")
             key_img = None
@@ -411,14 +403,18 @@ def run_grader():
         # 3. Display Status
         cv2.putText(display, "BUBBLE SHEET GRADER", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2, cv2.LINE_AA)
         
-        if key_img is None:
+        if key_img is None or key_positions is None: # <--- Consolidated check: if either is None, prompt for capture.
             status_text = "STATUS: PLACE KEY (Portrait) | Press 'K' to capture" 
             status_color = (0, 165, 255) # Orange
         elif current_mode == KEY_MODE:
-            # Check key_img shape to confirm if a key has been loaded or processed
+            # FIX: Safely determine the length of key_positions
+            ans_count = len(key_positions) if key_positions is not None else 0
+            
             key_width, key_height = key_img.shape[1], key_img.shape[0]
             roi_status = f"ROI: {roi_box[2]}x{roi_box[3]}" if roi_box and roi_box[2] > 0 else "ROI: None (Press 'C')"
-            status_text = f"KEY MODE: Active ({len(key_positions)} ans) | {key_width}x{key_height} | {roi_status}"
+            
+            # Use the safe ans_count variable
+            status_text = f"KEY MODE: Active ({ans_count} ans) | {key_width}x{key_height} | {roi_status}"
             status_color = (0, 255, 0) # Green
         else: # GRADE_MODE
             status_text = "GRADING READY: Place Student Sheet (Portrait) | Press 'R' to grade"
@@ -472,8 +468,8 @@ def run_grader():
 
         elif key == ord('p'):
             # Toggle to Grading Mode (as requested by user)
-            if key_img is None:
-                 print("⚠️ Cannot switch to Grading Mode. Capture the key first (press 'K').")
+            if key_img is None or key_positions is None:
+                 print("⚠️ Cannot switch to Grading Mode. Capture and process the key first (press 'K', then 'C' if needed).")
             else:
                  current_mode = GRADE_MODE
                  print("✅ Switched to Grading Ready Mode. Place student sheet in the guide box and press 'R'.")
@@ -492,11 +488,14 @@ def run_grader():
                 )
                 
                 if graded is not None:
-                    print(f"✅ Grading Result: {correct}/{len(key_positions)} correct. Student filled {total_filled} bubbles.")
+                    # Use safe check for len(key_positions)
+                    total_answers = len(key_positions) if key_positions is not None else 0
+                    
+                    print(f"✅ Grading Result: {correct}/{total_answers} correct. Student filled {total_filled} bubbles.")
                     
                     # --- SCORE TEXT ---
                     # Positioned to fit the portrait output (800x1100)
-                    score_text = f"Score: {correct}/{len(key_positions)}"
+                    score_text = f"Score: {correct}/{total_answers}"
                     score_y = 70 
                     score_font_scale = 1.0
                     score_font_thickness = 3
