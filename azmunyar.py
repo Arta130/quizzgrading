@@ -33,8 +33,8 @@ TARGET_POINTS = np.array([
 
 # --- Global State ---
 roi_box = None # Stores (x, y, w, h) of the crop area on the 800x1100 key image
-full_warped_key_a4 = None # Stores the 800x1100 key image before cropping
-key_img = None # Stores the final cropped key image (used for alignment/display)
+full_warped_key_a4 = None # Stores the full 800x1100 key image (used for ROI selection)
+key_img = None # Stores the final CROPPED key image (used for alignment/display)
 key_positions = None # Stores detected key bubble positions
 combined_result_to_save = None
 
@@ -44,14 +44,16 @@ GRADE_MODE = 1
 current_mode = KEY_MODE
 
 # --- File Paths ---
-KEY_REF_PATH = "key_reference.jpg"
+# New paths to ensure we can always reference the full, uncropped A4 image
+KEY_CROPPED_PATH = "key_cropped.jpg"
+KEY_FULL_A4_PATH = "key_full_a4.jpg"
 KEY_POS_PATH = "key_positions.json"
 KEY_ROI_PATH = "key_roi.json"
 
 def calculate_fixed_warp_points(width, height):
     """
     Calculates the fixed coordinates for the paper guide box.
-    This version uses a LARGE scale factor (0.9) to make the guide frame nearly 
+    Uses a large scale factor (0.9) to make the guide frame nearly 
     full-screen, while enforcing the 8:11 (Portrait) aspect ratio.
     """
     
@@ -66,7 +68,6 @@ def calculate_fixed_warp_points(width, height):
     box_w = box_h * ASPECT_RATIO # box_w will be smaller than box_h
     
     # 2. Fallback check: If the calculated width is too large, scale based on width instead
-    # This ensures the box always fits within the frame, maintaining the aspect ratio.
     if box_w > width * TARGET_SCALE_PERCENT: 
         box_w = width * TARGET_SCALE_PERCENT
         box_h = box_w / ASPECT_RATIO
@@ -76,7 +77,6 @@ def calculate_fixed_warp_points(width, height):
     margin_h = (height - box_h) / 2
     
     # Points: Top-Left, Top-Right, Bottom-Right, Bottom-Left
-    # This contour defines the area captured and warped to 800x1100.
     return np.array([
         [margin_w, margin_h],
         [width - margin_w - 1, margin_h],
@@ -272,8 +272,8 @@ def capture_key_from_camera(frame, fixed_source_points):
         print("⚠️ Fixed warp failed.")
         return None
 
-    # Save the full warped image (before cropping)
-    cv2.imwrite(KEY_REF_PATH, warped_key_a4)
+    # Save the full warped image (before cropping) for ROI selection
+    cv2.imwrite(KEY_FULL_A4_PATH, warped_key_a4)
     full_warped_key_a4 = warped_key_a4
 
     # Print message updated to reflect 800x1100 size and Portrait orientation
@@ -283,26 +283,36 @@ def capture_key_from_camera(frame, fixed_source_points):
 
 def process_key_with_roi(full_warped_key):
     """
-    Applies the ROI crop to the key, re-runs bubble detection, and saves the final key data.
+    Applies the ROI crop (from global roi_box) to the key, re-runs bubble detection, 
+    and saves the final key data.
     """
     global key_img, key_positions, roi_box
     
-    if roi_box:
+    # Check if a valid ROI box is set globally
+    if roi_box and roi_box[2] > 0 and roi_box[3] > 0:
         x, y, w, h = roi_box
-        cropped_key = full_warped_key[y:y+h, x:x+w]
+        # Use full_warped_key which is the 800x1100 image
+        cropped_key = full_warped_key[y:min(y+h, full_warped_key.shape[0]), x:min(x+w, full_warped_key.shape[1])]
     else:
+        # If no ROI is set, use the full image and update roi_box to match the full image
         cropped_key = full_warped_key
+        h, w, _ = full_warped_key.shape
+        roi_box = (0, 0, w, h)
+        # Save this 'full image' ROI as the default
+        with open(KEY_ROI_PATH, "w") as f:
+            json.dump(list(roi_box), f, indent=4)
+
 
     # 1. Bubble Detection on Cropped Image
     key_preview, new_key_positions = detect_key_bubbles(cropped_key)
 
     # 2. Save new key data
-    cv2.imwrite(KEY_REF_PATH, cropped_key) # Overwrite reference with the cropped version
+    cv2.imwrite(KEY_CROPPED_PATH, cropped_key) # Save the cropped version for fast alignment
     with open(KEY_POS_PATH, "w") as f:
         json.dump(new_key_positions, f, indent=4)
     cv2.imwrite("key_filled_preview.jpg", key_preview)
 
-    key_img = cropped_key
+    key_img = cropped_key # Set the global key_img to the cropped/final version
     key_positions = new_key_positions
     print(f"✅ Key processed with {len(key_positions)} filled bubbles.")
     return key_preview
@@ -318,7 +328,7 @@ def grade_student_sheet(student_img, key_img, key_positions, roi_box, fixed_sour
         print("⚠️ Fixed warp on student sheet failed.")
         return None, 0, 0
         
-    # 2. Apply ROI Crop
+    # 2. Apply ROI Crop (using the global roi_box)
     if roi_box:
         x, y, w, h = roi_box
         # Crop the student sheet in the same way the key was cropped
@@ -350,19 +360,16 @@ def run_grader():
     cap = cv2.VideoCapture(0)
     
     # Attempt to load saved data
-    if os.path.exists(KEY_REF_PATH) and os.path.exists(KEY_POS_PATH):
-        try:
-            key_img = cv2.imread(KEY_REF_PATH)
-            # We don't need full_warped_key_a4 unless we need to define a *new* ROI ('C')
-            with open(KEY_POS_PATH, "r") as f:
-                key_positions = json.load(f)
-            print(f"💾 Loaded existing key with {len(key_positions)} answers.")
-        except Exception as e:
-            print(f"Error loading key files: {e}")
-            key_img = None
-            key_positions = None
     
-    # Load ROI if it exists
+    # 1. Load FULL A4 image (needed for 'C' to work correctly)
+    if os.path.exists(KEY_FULL_A4_PATH):
+        try:
+            full_warped_key_a4 = cv2.imread(KEY_FULL_A4_PATH)
+            print("💾 Loaded full A4 reference image for ROI editing.")
+        except Exception as e:
+            print(f"Error loading full A4 key file: {e}. Skipping.")
+    
+    # 2. Load ROI if it exists
     if os.path.exists(KEY_ROI_PATH):
         try:
             with open(KEY_ROI_PATH, "r") as f:
@@ -371,6 +378,19 @@ def run_grader():
         except Exception as e:
             print(f"Error loading ROI file: {e}. Resetting ROI.")
             roi_box = None
+
+    # 3. Load CROPPED key image (used for fast alignment)
+    if os.path.exists(KEY_CROPPED_PATH) and os.path.exists(KEY_POS_PATH):
+        try:
+            key_img = cv2.imread(KEY_CROPPED_PATH)
+            with open(KEY_POS_PATH, "r") as f:
+                key_positions = json.load(f)
+            print(f"💾 Loaded existing key with {len(key_positions)} answers.")
+        except Exception as e:
+            print(f"Error loading cropped key files: {e}")
+            key_img = None
+            key_positions = None
+
 
     print("\n--- Auto Grader Initialized ---")
 
@@ -397,7 +417,7 @@ def run_grader():
         elif current_mode == KEY_MODE:
             # Check key_img shape to confirm if a key has been loaded or processed
             key_width, key_height = key_img.shape[1], key_img.shape[0]
-            roi_status = f"ROI: {roi_box[2]}x{roi_box[3]}" if roi_box else "ROI: None (Press 'C')"
+            roi_status = f"ROI: {roi_box[2]}x{roi_box[3]}" if roi_box and roi_box[2] > 0 else "ROI: None (Press 'C')"
             status_text = f"KEY MODE: Active ({len(key_positions)} ans) | {key_width}x{key_height} | {roi_status}"
             status_color = (0, 255, 0) # Green
         else: # GRADE_MODE
@@ -414,29 +434,31 @@ def run_grader():
             # Key Capture Mode
             current_mode = KEY_MODE
             
-            # 1. Capture and Warp to 800x1100 (Portrait)
+            # 1. Capture and Warp to 800x1100 (Portrait), saving to full_warped_key_a4
             new_full_warped = capture_key_from_camera(frame, fixed_contour)
             
             if new_full_warped is not None:
-                # 2. Process bubbles (re-run process_key_with_roi in case ROI is already set)
-                if roi_box:
+                if roi_box and roi_box[2] > 0:
+                    # If ROI is defined, automatically apply crop and process bubbles
                     process_key_with_roi(new_full_warped)
                 else:
+                    # If no ROI, set key_img to the full A4 image for immediate use
                     key_img = new_full_warped.copy() 
                     print("Hint: Press 'C' to set the Region of Interest now.")
             
         elif key == ord('c'):
             # Define Crop Area (ROI)
-            # Use full_warped_key_a4 if available, otherwise use key_img (the last loaded/processed one)
-            img_for_roi = full_warped_key_a4 if full_warped_key_a4 is not None else key_img
+            
+            # CRITICAL: Always use the full_warped_key_a4 for ROI selection
+            img_for_roi = full_warped_key_a4 
             
             if img_for_roi is None:
                 print("⚠️ Please capture the Key Sheet first (press 'K').")
             else:
                 print("--- ROI Selection Started ---")
                 
-                # Make a copy just in case the selectROI operation modifies the image
-                new_key_img, new_roi_box = select_and_crop_roi(img_for_roi.copy()) 
+                # new_key_img here is TEMPORARILY the cropped preview of the selection
+                new_key_img_preview, new_roi_box = select_and_crop_roi(img_for_roi.copy()) 
                 
                 if new_roi_box:
                     roi_box = new_roi_box
@@ -445,7 +467,7 @@ def run_grader():
                     with open(KEY_ROI_PATH, "w") as f:
                         json.dump(list(roi_box), f, indent=4)
                     
-                    # Process the key image with the new ROI
+                    # Process the key image with the new ROI (uses the full A4 image in memory)
                     process_key_with_roi(img_for_roi)
 
         elif key == ord('p'):
